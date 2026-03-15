@@ -1,0 +1,54 @@
+{
+  "_Container-BSQIrRva.js": {
+    "file": "assets/Container-BSQIrRva.js",
+    "name": "Container",
+    "imports": [
+      "_chunk-EPOLDU6W-OgY0jw8E.js"
+    ]
+  },
+  "_chunk-EPOLDU6W-OgY0jw8E.js": {
+    "file": "assets/chunk-EPOLDU6W-OgY0jw8E.js",
+    "name": "chunk-EPOLDU6W"
+  },
+  "_index-DQLAj07T.js": {
+    "file": "assets/index-DQLAj07T.js",
+    "name": "index",
+    "imports": [
+      "_chunk-EPOLDU6W-OgY0jw8E.js"
+    ]
+  },
+  "app/root.tsx?__react-router-build-client-route": {
+    "file": "assets/root-BvcMJbzM.js",
+    "name": "root",
+    "src": "app/root.tsx?__react-router-build-client-route",
+    "isEntry": true,
+    "imports": [
+      "_chunk-EPOLDU6W-OgY0jw8E.js",
+      "_Container-BSQIrRva.js"
+    ],
+    "css": [
+      "assets/root-C4SPBCkT.css"
+    ]
+  },
+  "app/routes/PartAssignPage.tsx?__react-router-build-client-route": {
+    "file": "assets/PartAssignPage-CmbtTJnl.js",
+    "name": "PartAssignPage",
+    "src": "app/routes/PartAssignPage.tsx?__react-router-build-client-route",
+    "isEntry": true,
+    "imports": [
+      "_chunk-EPOLDU6W-OgY0jw8E.js",
+      "_Container-BSQIrRva.js",
+      "_index-DQLAj07T.js"
+    ]
+  },
+  "node_modules/@react-router/dev/dist/config/defaults/entry.client.tsx": {
+    "file": "assets/entry.client-Cjmh3nZ0.js",
+    "name": "entry.client",
+    "src": "node_modules/@react-router/dev/dist/config/defaults/entry.client.tsx",
+    "isEntry": true,
+    "imports": [
+      "_chunk-EPOLDU6W-OgY0jw8E.js",
+      "_index-DQLAj07T.js"
+    ]
+  }
+}
