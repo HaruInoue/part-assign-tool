@@ -6,9 +6,26 @@ import {
   Scripts,
   ScrollRestoration,
 } from "react-router";
+import {
+  Box,
+  Container,
+  CssBaseline,
+  ThemeProvider,
+  Typography,
+  createTheme,
+} from "@mui/material";
 
 import type { Route } from "@/+types/root";
 import "@/app.css";
+
+const theme = createTheme({
+  palette: {
+    mode: "light",
+  },
+  typography: {
+    fontFamily: '"Inter", "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif',
+  },
+});
 
 export const links: Route.LinksFunction = () => [
   { rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -17,6 +34,7 @@ export const links: Route.LinksFunction = () => [
     href: "https://fonts.gstatic.com",
     crossOrigin: "anonymous",
   },
+  { rel: "icon", href: `${import.meta.env.BASE_URL}favicon.ico`, type: "image/x-icon" },
   {
     rel: "stylesheet",
     href: "https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap",
@@ -33,9 +51,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <Links />
       </head>
       <body>
-        {children}
-        <ScrollRestoration />
-        <Scripts />
+        <ThemeProvider theme={theme}>
+          <CssBaseline />
+          {children}
+          <ScrollRestoration />
+          <Scripts />
+        </ThemeProvider>
       </body>
     </html>
   );
@@ -59,15 +80,29 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   }
 
   return (
-    <main className="pt-16 p-4 container mx-auto">
-      <h1>{message}</h1>
-      <p>{details}</p>
+    <Container maxWidth="md" sx={{ pt: 8, px: 2 }}>
+      <Typography variant="h4" component="h1" gutterBottom>
+        {message}
+      </Typography>
+      <Typography variant="body1" color="text.secondary">
+        {details}
+      </Typography>
       {stack && (
-        <pre className="w-full p-4 overflow-x-auto">
+        <Box
+          component="pre"
+          sx={{
+            width: "100%",
+            p: 2,
+            mt: 2,
+            overflowX: "auto",
+            bgcolor: "grey.100",
+            borderRadius: 1,
+          }}
+        >
           <code>{stack}</code>
-        </pre>
+        </Box>
       )}
-    </main>
+    </Container>
   );
 }
 
