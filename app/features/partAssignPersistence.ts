@@ -1,9 +1,19 @@
+import { compressToEncodedURIComponent, decompressFromEncodedURIComponent } from "lz-string";
+
 import type {
     Item,
-    PartAssignSettings
+    PartAssignSettings,
 } from "@/features/types/partAssignTypes";
 
 const STORAGE_KEY = "part-assign-tool:settings";
+const URL_STATE_PARAM_KEY = "state";
+
+export type UrlStateLoadStatus = "none" | "success" | "error";
+
+type UrlStateLoadResult = {
+    settings: PartAssignSettings | null;
+    status: UrlStateLoadStatus;
+};
 
 // 値がオブジェクト型かどうかを判定する型ガード
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -38,6 +48,7 @@ const isPartAssignSettings = (value: unknown): value is PartAssignSettings => {
     }
     if (typeof value.rankCount !== "number") return false;
     if (!Number.isInteger(value.rankCount) || value.rankCount < 1) return false;
+    if (typeof value.unrankedPenalty !== "number" || !Number.isFinite(value.unrankedPenalty)) return false;
     if (!isNumberArray(value.weights)) {
         return false;
     }
@@ -58,11 +69,60 @@ export const loadPartAssignSettings = (): PartAssignSettings | null => {
             parts: parsed.parts,
             rankCount: parsed.rankCount,
             weights: parsed.weights,
+            unrankedPenalty: parsed.unrankedPenalty,
             preferences: parsed.preferences,
         };
     } catch {
         return null;
     }
+};
+
+// URL クエリから設定を読み込んでバリデーションする
+export const loadPartAssignSettingsFromUrl = (): UrlStateLoadResult => {
+    if (typeof window === "undefined") {
+        return { settings: null, status: "none" };
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const encoded = params.get(URL_STATE_PARAM_KEY);
+    if (encoded === null) {
+        return { settings: null, status: "none" };
+    }
+
+    try {
+        const json = decompressFromEncodedURIComponent(encoded);
+        if (!json) {
+            return { settings: null, status: "error" };
+        }
+
+        const parsed: unknown = JSON.parse(json);
+        if (!isPartAssignSettings(parsed)) {
+            return { settings: null, status: "error" };
+        }
+
+        return {
+            settings: {
+                participants: parsed.participants,
+                parts: parsed.parts,
+                rankCount: parsed.rankCount,
+                weights: parsed.weights,
+                unrankedPenalty: parsed.unrankedPenalty,
+                preferences: parsed.preferences,
+            },
+            status: "success",
+        };
+    } catch {
+        return { settings: null, status: "error" };
+    }
+};
+
+// 現在の設定を共有用 URL に変換する
+export const createPartAssignShareUrl = (settings: PartAssignSettings): string => {
+    if (typeof window === "undefined") return "";
+
+    const serialized = JSON.stringify(settings);
+    const compressed = compressToEncodedURIComponent(serialized);
+    return `${window.location.origin}${window.location.pathname}?${URL_STATE_PARAM_KEY}=${compressed}`;
 };
 
 // 現在の設定を localStorage に保存する

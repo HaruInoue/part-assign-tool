@@ -3,14 +3,32 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 
-import { loadPartAssignSettings } from "@/features/partAssignStorage";
+import {
+    loadPartAssignSettings,
+    loadPartAssignSettingsFromUrl,
+    savePartAssignSettings,
+} from "@/features/partAssignPersistence";
 
 import type { Item, PartAssignSettings } from "@/features/types/partAssignTypes";
+import type { UrlStateLoadStatus } from "@/features/partAssignPersistence";
 import type { UseFormReturn } from "react-hook-form";
 
+export const NO_PREFERENCE = "__NO_PREFERENCE__";
+
+let initialUrlLoadStatus: UrlStateLoadStatus = "none";
+
+export const getInitialUrlLoadStatus = () => initialUrlLoadStatus;
+
 // ユニークな ID を生成する
-export const createId = () =>
-    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+export const createId = () => {
+    const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
+    if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+        const bytes = new Uint8Array(7);
+        crypto.getRandomValues(bytes);
+        return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+    }
+    return Math.random().toString(36).slice(2, 9).padEnd(7, "0");
+};
 
 // デフォルト参加者リスト（3名）を生成する
 export const defaultParticipants = (): Item[] =>
@@ -62,13 +80,15 @@ export const normalizePreferences = (
     nextRankCount: number,
 ): Record<string, string[]> => {
     const validPartIds = new Set(nextParts.map((part) => part.id));
+    const isValidPreferenceValue = (partId: string) =>
+        partId === NO_PREFERENCE || validPartIds.has(partId);
     const next: Record<string, string[]> = {};
 
     nextParticipants.forEach((participant) => {
         const rawRow = source[participant.id] ?? [];
         const row = rawRow
             .slice(0, nextRankCount)
-            .map((partId) => (validPartIds.has(partId) ? partId : ""));
+            .map((partId) => (isValidPreferenceValue(partId) ? partId : ""));
         while (row.length < nextRankCount) row.push("");
         next[participant.id] = row;
     });
@@ -86,19 +106,34 @@ export const getInitialPartAssignSettings = (): PartAssignSettings => {
         parts: fallbackParts,
         rankCount: fallbackRankCount,
         weights: createDefaultWeights(fallbackRankCount),
+        unrankedPenalty: -fallbackParts.length,
         preferences: createDefaultPreferences(fallbackParticipants, fallbackRankCount),
     };
+
+    const normalizeSettings = (source: PartAssignSettings) => {
+        const participants = source.participants.length > 0 ? source.participants : fallbackParticipants;
+        const parts = source.parts.length > 0 ? source.parts : fallbackParts;
+        const rankCount = clampRankCount(source.rankCount, parts.length);
+        const weights = normalizeWeightsByRankCount(source.weights, rankCount);
+        const unrankedPenalty = source.unrankedPenalty;
+        const preferences = normalizePreferences(source.preferences, participants, parts, rankCount);
+
+        return { participants, parts, rankCount, weights, unrankedPenalty, preferences };
+    };
+
+    const urlLoadResult = loadPartAssignSettingsFromUrl();
+    initialUrlLoadStatus = urlLoadResult.status;
+
+    if (urlLoadResult.settings) {
+        const normalized = normalizeSettings(urlLoadResult.settings);
+        savePartAssignSettings(normalized);
+        return normalized;
+    }
 
     const stored = loadPartAssignSettings();
     if (!stored) return fallbackSettings;
 
-    const participants = stored.participants.length > 0 ? stored.participants : fallbackParticipants;
-    const parts = stored.parts.length > 0 ? stored.parts : fallbackParts;
-    const rankCount = clampRankCount(stored.rankCount, parts.length);
-    const weights = normalizeWeightsByRankCount(stored.weights, rankCount);
-    const preferences = normalizePreferences(stored.preferences, participants, parts, rankCount);
-
-    return { participants, parts, rankCount, weights, preferences };
+    return normalizeSettings(stored);
 };
 
 // PartAssignSettings の Zod スキーマを定義する
@@ -118,6 +153,7 @@ const partAssignSchema = z
         ),
         rankCount: z.number().int().min(1),
         weights: z.array(z.number()),
+        unrankedPenalty: z.number(),
         preferences: z.record(z.string(), z.array(z.string())),
     })
     .superRefine((value, context) => {
@@ -197,7 +233,7 @@ const partAssignSchema = z
             while (row.length < normalizedRankCount) row.push("");
 
             row.forEach((partId, rankIndex) => {
-                if (partId && validPartIds.has(partId)) return;
+                if (partId && (partId === NO_PREFERENCE || validPartIds.has(partId))) return;
                 context.addIssue({
                     code: "custom",
                     path: ["preferences", participant.id, rankIndex],
@@ -207,7 +243,7 @@ const partAssignSchema = z
 
             const selectedPartMap = new Map<string, number[]>();
             row.forEach((partId, rankIndex) => {
-                if (!partId) return;
+                if (!partId || partId === NO_PREFERENCE) return;
                 selectedPartMap.set(partId, [...(selectedPartMap.get(partId) ?? []), rankIndex]);
             });
 

@@ -34,6 +34,7 @@ export interface PartAssignSettings {
     parts: Item[];
     rankCount: number;
     weights: number[];
+    unrankedPenalty: number;
     preferences: Record<string, string[]>;
 }
 

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { useFieldArray } from "react-hook-form";
 
 import {
+    createPartAssignShareUrl,
     clearPartAssignSettings,
     savePartAssignSettings,
-} from "@/features/partAssignStorage";
+} from "@/features/partAssignPersistence";
 import {
     clampRankCount,
     createDefaultPreferences,
@@ -12,7 +13,9 @@ import {
     createId,
     defaultParticipants,
     defaultParts,
+    getInitialUrlLoadStatus,
     getInitialPartAssignSettings,
+    NO_PREFERENCE,
     normalizePreferences,
     normalizeWeightsByRankCount,
 } from "@/features/usePartAssignForm";
@@ -63,6 +66,9 @@ const extractIssueMessages = (error: IssueFieldError | undefined): string[] => {
 export function usePartAssign(form: PartAssignForm) {
     const { control, getValues, setValue, watch, reset, formState, getFieldState, trigger } = form;
     const [result, setResult] = useState<SolveResult>(createEmptyResult());
+    const [urlLoadError, setUrlLoadError] = useState(false);
+    const [copyShareUrlDone, setCopyShareUrlDone] = useState(false);
+    const copyShareUrlDoneTimerRef = useRef<number | null>(null);
 
     const participantsFieldArray = useFieldArray({
         control,
@@ -79,10 +85,15 @@ export function usePartAssign(form: PartAssignForm) {
     const parts = watch("parts") ?? [];
     const rankCountValue = watch("rankCount");
     const weightsValue = watch("weights");
+    const unrankedPenaltyValue = watch("unrankedPenalty");
     const preferencesValue = watch("preferences");
 
     const rankCount = typeof rankCountValue === "number" ? rankCountValue : 1;
     const weights = Array.isArray(weightsValue) ? weightsValue : [];
+    const unrankedPenalty =
+        typeof unrankedPenaltyValue === "number" && Number.isFinite(unrankedPenaltyValue)
+            ? unrankedPenaltyValue
+            : -parts.length;
     const preferences = preferencesValue ?? {};
 
     // 計算結果をリセットする
@@ -100,25 +111,28 @@ export function usePartAssign(form: PartAssignForm) {
         return normalizeWeightsByRankCount(weights, normalizedRankCount);
     }, [normalizedRankCount, weights]);
 
-    // 希望外パートに割り当てられたときのペナルティスコア
-    const unrankedPenalty = -parts.length;
-
     // 現在の設定を localStorage に永続化する
     const persistSettings = useCallback(() => {
         const values = getValues();
+        const partCount = (values.parts ?? []).length;
+        const normalizedRankCount = clampRankCount(values.rankCount ?? 1, partCount);
         savePartAssignSettings({
             participants: values.participants ?? [],
             parts: values.parts ?? [],
-            rankCount: clampRankCount(values.rankCount ?? 1, (values.parts ?? []).length),
+            rankCount: normalizedRankCount,
             weights: normalizeWeightsByRankCount(
                 values.weights ?? [],
-                clampRankCount(values.rankCount ?? 1, (values.parts ?? []).length),
+                normalizedRankCount,
             ),
+            unrankedPenalty:
+                typeof values.unrankedPenalty === "number" && Number.isFinite(values.unrankedPenalty)
+                    ? values.unrankedPenalty
+                    : -partCount,
             preferences: normalizePreferences(
                 values.preferences ?? {},
                 values.participants ?? [],
                 values.parts ?? [],
-                clampRankCount(values.rankCount ?? 1, (values.parts ?? []).length),
+                normalizedRankCount,
             ),
         });
     }, [getValues]);
@@ -129,6 +143,32 @@ export function usePartAssign(form: PartAssignForm) {
         });
         return () => subscription.unsubscribe();
     }, [persistSettings, watch]);
+
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+
+        const initialUrlStatus = getInitialUrlLoadStatus();
+        if (initialUrlStatus === "success") {
+            const params = new URLSearchParams(window.location.search);
+            params.delete("state");
+            const nextQuery = params.toString();
+            const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+            window.history.replaceState(null, "", nextUrl);
+            return;
+        }
+
+        if (initialUrlStatus === "error") {
+            setUrlLoadError(true);
+        }
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            if (copyShareUrlDoneTimerRef.current !== null) {
+                window.clearTimeout(copyShareUrlDoneTimerRef.current);
+            }
+        };
+    }, []);
 
     const canSolve = formState.isValid;
 
@@ -326,6 +366,12 @@ export function usePartAssign(form: PartAssignForm) {
         clearResult();
     };
 
+    // 圏外配点を更新する
+    const updateUnrankedPenalty = (value: number) => {
+        setValue("unrankedPenalty", value, { shouldDirty: true, shouldValidate: true });
+        clearResult();
+    };
+
     // 希望入力セルを touched としてマークする
     const touchPreference = (participantId: string, rankIndex: number) => {
         const fieldPath = `preferences.${participantId}` as const;
@@ -346,6 +392,7 @@ export function usePartAssign(form: PartAssignForm) {
             parts: nextParts,
             rankCount: nextRankCount,
             weights: createDefaultWeights(nextRankCount),
+            unrankedPenalty: -nextParts.length,
             preferences: createDefaultPreferences(nextParticipants, nextRankCount),
         });
         setResult(createEmptyResult());
@@ -357,6 +404,46 @@ export function usePartAssign(form: PartAssignForm) {
         setResult(createEmptyResult());
     };
 
+    // 現在の設定から共有用 URL を生成してクリップボードにコピーする
+    const copyShareUrl = async () => {
+        if (typeof window === "undefined") return;
+
+        const values = getValues();
+        const normalizedRankCount = clampRankCount(values.rankCount ?? 1, (values.parts ?? []).length);
+        const settings = {
+            participants: values.participants ?? [],
+            parts: values.parts ?? [],
+            rankCount: normalizedRankCount,
+            weights: normalizeWeightsByRankCount(values.weights ?? [], normalizedRankCount),
+            unrankedPenalty:
+                typeof values.unrankedPenalty === "number" && Number.isFinite(values.unrankedPenalty)
+                    ? values.unrankedPenalty
+                    : -(values.parts ?? []).length,
+            preferences: normalizePreferences(
+                values.preferences ?? {},
+                values.participants ?? [],
+                values.parts ?? [],
+                normalizedRankCount,
+            ),
+        };
+
+        const shareUrl = createPartAssignShareUrl(settings);
+
+        try {
+            await navigator.clipboard.writeText(shareUrl);
+            setCopyShareUrlDone(true);
+            if (copyShareUrlDoneTimerRef.current !== null) {
+                window.clearTimeout(copyShareUrlDoneTimerRef.current);
+            }
+            copyShareUrlDoneTimerRef.current = window.setTimeout(() => {
+                setCopyShareUrlDone(false);
+                copyShareUrlDoneTimerRef.current = null;
+            }, 2000);
+        } catch {
+            setCopyShareUrlDone(false);
+        }
+    };
+
     // 全探索でベストなパート割り当てを計算する
     const solve = () => {
         if (!canSolve) {
@@ -365,14 +452,47 @@ export function usePartAssign(form: PartAssignForm) {
         }
 
         const n = participants.length;
-        const scoreMatrix: number[][] = participants.map((participant) => {
+        const evaluatePartScore = (row: string[], assignedPartId: string) => {
+            const normalizedRow = row.slice(0, normalizedRankCount);
+            while (normalizedRow.length < normalizedRankCount) normalizedRow.push("");
+
+            const explicitlySelectedPartIds = new Set<string>();
+
+            for (let rankIndex = 0; rankIndex < normalizedRankCount; rankIndex += 1) {
+                const preferredPartId = normalizedRow[rankIndex];
+                if (!preferredPartId) continue;
+
+                if (preferredPartId === NO_PREFERENCE) {
+                    if (!explicitlySelectedPartIds.has(assignedPartId)) {
+                        return {
+                            score: normalizedWeights[rankIndex] ?? 0,
+                            rank: rankIndex + 1,
+                        };
+                    }
+                    continue;
+                }
+
+                if (preferredPartId === assignedPartId) {
+                    return {
+                        score: normalizedWeights[rankIndex] ?? 0,
+                        rank: rankIndex + 1,
+                    };
+                }
+
+                explicitlySelectedPartIds.add(preferredPartId);
+            }
+
+            return { score: unrankedPenalty, rank: null };
+        };
+
+        const evaluationMatrix = participants.map((participant) => {
             const row = preferences[participant.id] ?? [];
-            return parts.map((part) => {
-                const rankIndex = row.findIndex((partId) => partId === part.id);
-                if (rankIndex === -1) return unrankedPenalty;
-                return normalizedWeights[rankIndex] ?? 0;
-            });
+            return parts.map((part) => evaluatePartScore(row, part.id));
         });
+
+        const scoreMatrix: number[][] = evaluationMatrix.map((evaluationRow) =>
+            evaluationRow.map((evaluation) => evaluation.score),
+        );
 
         const used = Array.from({ length: n }, () => false);
         const currentAssignment = Array.from({ length: n }, () => -1);
@@ -382,18 +502,22 @@ export function usePartAssign(form: PartAssignForm) {
 
         // 現在の割り当て状態から AssignmentCandidate オブジェクトを構築する
         const buildCandidate = (totalScore: number): AssignmentCandidate => {
-            const lines: AssignmentLine[] = participants.map((participant, participantIndex) => {
-                const partIndex = currentAssignment[participantIndex];
-                const part = parts[partIndex];
-                const row = preferences[participant.id] ?? [];
-                const rankIndex = row.findIndex((partId) => partId === part.id);
+            const participantIndexByPartIndex = Array.from({ length: n }, () => -1);
+            currentAssignment.forEach((partIndex, participantIndex) => {
+                participantIndexByPartIndex[partIndex] = participantIndex;
+            });
+
+            const lines: AssignmentLine[] = parts.map((part, partIndex) => {
+                const participantIndex = participantIndexByPartIndex[partIndex];
+                const participant = participants[participantIndex];
+                const evaluation = evaluationMatrix[participantIndex][partIndex];
                 return {
                     participantId: participant.id,
                     participantName: participant.name,
                     partId: part.id,
                     partName: part.name,
-                    rank: rankIndex >= 0 ? rankIndex + 1 : null,
-                    score: scoreMatrix[participantIndex][partIndex],
+                    rank: evaluation.rank,
+                    score: evaluation.score,
                 };
             });
             return { totalScore, lines };
@@ -462,10 +586,15 @@ export function usePartAssign(form: PartAssignForm) {
         updateRankCount,
         updatePreference,
         updateWeight,
+        updateUnrankedPenalty,
         persistSettings,
+        copyShareUrl,
+        copyShareUrlDone,
         solve,
         resetAll,
         resetByInitialSettings,
+        urlLoadError,
+        dismissUrlLoadError: () => setUrlLoadError(false),
         maxTieResults: MAX_TIE_RESULTS,
         maxSearchSize: MAX_SEARCH_SIZE,
     };
