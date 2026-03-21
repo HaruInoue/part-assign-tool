@@ -1,8 +1,8 @@
 .DS_Store
 .env
-.code-workspace
 /.vscode/
 /node_modules/
+*.code-workspace
 
 # React Router
 /.react-router/
