@@ -4,20 +4,27 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 
 import {
-    loadPartAssignSettings,
-    loadPartAssignSettingsFromUrl,
+    loadInitialPartAssignSettings,
     savePartAssignSettings,
 } from "@/features/partAssignPersistence";
 
 import type { Item, PartAssignSettings } from "@/features/types/partAssignTypes";
-import type { UrlStateLoadStatus } from "@/features/partAssignPersistence";
+import type {
+    InitialSettingsSource,
+    UrlStateLoadStatus,
+} from "@/features/partAssignPersistence";
 import type { UseFormReturn } from "react-hook-form";
 
 export const NO_PREFERENCE = "__NO_PREFERENCE__";
 
-let initialUrlLoadStatus: UrlStateLoadStatus = "none";
+export type InitialPartAssignState = {
+    settings: PartAssignSettings;
+    source: InitialSettingsSource;
+    shouldAutoSolve: boolean;
+    urlLoadStatus: UrlStateLoadStatus;
+};
 
-export const getInitialUrlLoadStatus = () => initialUrlLoadStatus;
+let cachedInitialPartAssignState: InitialPartAssignState | null = null;
 
 // ユニークな ID を生成する
 export const createId = () => {
@@ -96,45 +103,71 @@ export const normalizePreferences = (
     return next;
 };
 
+const createFallbackSettings = (): PartAssignSettings => {
+    const participants = defaultParticipants();
+    const parts = defaultParts();
+    const rankCount = 3;
+
+    return {
+        participants,
+        parts,
+        rankCount,
+        weights: createDefaultWeights(rankCount),
+        unrankedPenalty: -parts.length,
+        preferences: createDefaultPreferences(participants, rankCount),
+    };
+};
+
+const normalizeInitialSettings = (
+    source: PartAssignSettings,
+    fallback: PartAssignSettings,
+): PartAssignSettings => {
+    const participants = source.participants.length > 0 ? source.participants : fallback.participants;
+    const parts = source.parts.length > 0 ? source.parts : fallback.parts;
+    const rankCount = clampRankCount(source.rankCount, parts.length);
+    const weights = normalizeWeightsByRankCount(source.weights, rankCount);
+    const unrankedPenalty = source.unrankedPenalty;
+    const preferences = normalizePreferences(source.preferences, participants, parts, rankCount);
+
+    return { participants, parts, rankCount, weights, unrankedPenalty, preferences };
+};
+
 // localStorage から初期設定を読み込む（存在しない場合はデフォルト値を返す）
 export const getInitialPartAssignSettings = (): PartAssignSettings => {
-    const fallbackParticipants = defaultParticipants();
-    const fallbackParts = defaultParts();
-    const fallbackRankCount = 3;
-    const fallbackSettings: PartAssignSettings = {
-        participants: fallbackParticipants,
-        parts: fallbackParts,
-        rankCount: fallbackRankCount,
-        weights: createDefaultWeights(fallbackRankCount),
-        unrankedPenalty: -fallbackParts.length,
-        preferences: createDefaultPreferences(fallbackParticipants, fallbackRankCount),
-    };
+    return getInitialPartAssignState().settings;
+};
 
-    const normalizeSettings = (source: PartAssignSettings) => {
-        const participants = source.participants.length > 0 ? source.participants : fallbackParticipants;
-        const parts = source.parts.length > 0 ? source.parts : fallbackParts;
-        const rankCount = clampRankCount(source.rankCount, parts.length);
-        const weights = normalizeWeightsByRankCount(source.weights, rankCount);
-        const unrankedPenalty = source.unrankedPenalty;
-        const preferences = normalizePreferences(source.preferences, participants, parts, rankCount);
-
-        return { participants, parts, rankCount, weights, unrankedPenalty, preferences };
-    };
-
-    const urlLoadResult = loadPartAssignSettingsFromUrl();
-    initialUrlLoadStatus = urlLoadResult.status;
-
-    if (urlLoadResult.settings) {
-        const normalized = normalizeSettings(urlLoadResult.settings);
-        savePartAssignSettings(normalized);
-        return normalized;
+export const getInitialPartAssignState = (): InitialPartAssignState => {
+    if (cachedInitialPartAssignState) {
+        return cachedInitialPartAssignState;
     }
 
-    const stored = loadPartAssignSettings();
-    if (!stored) return fallbackSettings;
+    const fallbackSettings = createFallbackSettings();
+    const loaded = loadInitialPartAssignSettings();
 
-    return normalizeSettings(stored);
+    const settings = loaded.settings
+        ? normalizeInitialSettings(loaded.settings, fallbackSettings)
+        : fallbackSettings;
+
+    if (loaded.source === "url") {
+        savePartAssignSettings(settings);
+    }
+
+    cachedInitialPartAssignState = {
+        settings,
+        source: loaded.source,
+        shouldAutoSolve: loaded.source !== "default",
+        urlLoadStatus: loaded.urlStateStatus,
+    };
+
+    return cachedInitialPartAssignState;
 };
+
+export const getInitialUrlLoadStatus = (): UrlStateLoadStatus =>
+    getInitialPartAssignState().urlLoadStatus;
+
+export const getInitialShouldAutoSolve = (): boolean =>
+    getInitialPartAssignState().shouldAutoSolve;
 
 // PartAssignSettings の Zod スキーマを定義する
 const partAssignSchema = z
@@ -260,14 +293,17 @@ const partAssignSchema = z
         });
     });
 
+export const canSolvePartAssignSettings = (settings: PartAssignSettings): boolean =>
+    partAssignSchema.safeParse(settings).success;
+
 export type PartAssignForm = UseFormReturn<PartAssignSettings>;
 
 // React Hook Form のフォーム定義を初期化して返す
 export function usePartAssignForm(): PartAssignForm {
-    const defaultValues = useMemo(getInitialPartAssignSettings, []);
+    const initialState = useMemo(getInitialPartAssignState, []);
 
     return useForm<PartAssignSettings>({
-        defaultValues,
+        defaultValues: initialState.settings,
         mode: "onChange",
         resolver: zodResolver(partAssignSchema),
         criteriaMode: "all",

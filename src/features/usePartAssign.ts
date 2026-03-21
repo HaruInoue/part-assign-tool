@@ -7,12 +7,14 @@ import {
     savePartAssignSettings,
 } from "@/features/partAssignPersistence";
 import {
+    canSolvePartAssignSettings,
     clampRankCount,
     createDefaultPreferences,
     createDefaultWeights,
     createId,
     defaultParticipants,
     defaultParts,
+    getInitialShouldAutoSolve,
     getInitialUrlLoadStatus,
     getInitialPartAssignSettings,
     NO_PREFERENCE,
@@ -46,6 +48,140 @@ const calcSearchCount = (n: number) => {
     return value;
 };
 
+type SolveComputationInput = {
+    participants: Item[];
+    parts: Item[];
+    preferences: Record<string, string[]>;
+    normalizedRankCount: number;
+    normalizedWeights: number[];
+    unrankedPenalty: number;
+};
+
+const computeSolveResult = ({
+    participants,
+    parts,
+    preferences,
+    normalizedRankCount,
+    normalizedWeights,
+    unrankedPenalty,
+}: SolveComputationInput): SolveResult => {
+    if (
+        participants.length === 0
+        || parts.length === 0
+        || participants.length !== parts.length
+        || participants.length > MAX_SEARCH_SIZE
+    ) {
+        return createEmptyResult();
+    }
+
+    const n = participants.length;
+    const evaluatePartScore = (row: string[], assignedPartId: string) => {
+        const normalizedRow = row.slice(0, normalizedRankCount);
+        while (normalizedRow.length < normalizedRankCount) normalizedRow.push("");
+
+        const explicitlySelectedPartIds = new Set<string>();
+
+        for (let rankIndex = 0; rankIndex < normalizedRankCount; rankIndex += 1) {
+            const preferredPartId = normalizedRow[rankIndex];
+            if (!preferredPartId) continue;
+
+            if (preferredPartId === NO_PREFERENCE) {
+                if (!explicitlySelectedPartIds.has(assignedPartId)) {
+                    return {
+                        score: normalizedWeights[rankIndex] ?? 0,
+                        rank: rankIndex + 1,
+                    };
+                }
+                continue;
+            }
+
+            if (preferredPartId === assignedPartId) {
+                return {
+                    score: normalizedWeights[rankIndex] ?? 0,
+                    rank: rankIndex + 1,
+                };
+            }
+
+            explicitlySelectedPartIds.add(preferredPartId);
+        }
+
+        return { score: unrankedPenalty, rank: null };
+    };
+
+    const evaluationMatrix = participants.map((participant) => {
+        const row = preferences[participant.id] ?? [];
+        return parts.map((part) => evaluatePartScore(row, part.id));
+    });
+
+    const scoreMatrix: number[][] = evaluationMatrix.map((evaluationRow) =>
+        evaluationRow.map((evaluation) => evaluation.score),
+    );
+
+    const used = Array.from({ length: n }, () => false);
+    const currentAssignment = Array.from({ length: n }, () => -1);
+    const candidates: AssignmentCandidate[] = [];
+    let bestScore = Number.NEGATIVE_INFINITY;
+    let tieCount = 0;
+
+    // 現在の割り当て状態から AssignmentCandidate オブジェクトを構築する
+    const buildCandidate = (totalScore: number): AssignmentCandidate => {
+        const participantIndexByPartIndex = Array.from({ length: n }, () => -1);
+        currentAssignment.forEach((partIndex, participantIndex) => {
+            participantIndexByPartIndex[partIndex] = participantIndex;
+        });
+
+        const lines: AssignmentLine[] = parts.map((part, partIndex) => {
+            const participantIndex = participantIndexByPartIndex[partIndex];
+            const participant = participants[participantIndex];
+            const evaluation = evaluationMatrix[participantIndex][partIndex];
+            return {
+                participantId: participant.id,
+                participantName: participant.name,
+                partId: part.id,
+                partName: part.name,
+                rank: evaluation.rank,
+                score: evaluation.score,
+            };
+        });
+        return { totalScore, lines };
+    };
+
+    // 深さ優先探索で全割り当てパターンを探索する
+    const dfs = (depth: number, score: number) => {
+        if (depth === n) {
+            if (score > bestScore) {
+                bestScore = score;
+                tieCount = 1;
+                candidates.length = 0;
+                candidates.push(buildCandidate(score));
+            } else if (score === bestScore) {
+                tieCount += 1;
+                if (candidates.length < MAX_TIE_RESULTS) {
+                    candidates.push(buildCandidate(score));
+                }
+            }
+            return;
+        }
+
+        for (let partIndex = 0; partIndex < n; partIndex += 1) {
+            if (used[partIndex]) continue;
+            used[partIndex] = true;
+            currentAssignment[depth] = partIndex;
+            dfs(depth + 1, score + scoreMatrix[depth][partIndex]);
+            used[partIndex] = false;
+        }
+    };
+
+    dfs(0, 0);
+
+    return {
+        totalBestScore: Number.isFinite(bestScore) ? bestScore : null,
+        candidates,
+        overflowCount: Math.max(tieCount - MAX_TIE_RESULTS, 0),
+        searchedCount: calcSearchCount(n),
+    };
+};
+
 // 希望入力セルを一意に識別するキーを生成する
 const createPreferenceIssueKey = (participantId: string, rankIndex: number) =>
     `${participantId}:${rankIndex}`;
@@ -65,8 +201,46 @@ const extractIssueMessages = (error: IssueFieldError | undefined): string[] => {
 // パート割り当てロジックをフォーム状態と結合して提供するカスタムフック
 export function usePartAssign(form: PartAssignForm) {
     const { control, getValues, setValue, watch, reset, formState, getFieldState, trigger } = form;
-    const [result, setResult] = useState<SolveResult>(createEmptyResult());
-    const [urlLoadError, setUrlLoadError] = useState(false);
+    const [result, setResult] = useState<SolveResult>(() => {
+        if (!getInitialShouldAutoSolve()) {
+            return createEmptyResult();
+        }
+
+        const initialValues = getValues();
+        const initialParticipants = initialValues.participants ?? [];
+        const initialParts = initialValues.parts ?? [];
+        const initialRankCount = clampRankCount(initialValues.rankCount ?? 1, initialParts.length);
+        const initialSettings = {
+            participants: initialParticipants,
+            parts: initialParts,
+            rankCount: initialRankCount,
+            weights: normalizeWeightsByRankCount(initialValues.weights ?? [], initialRankCount),
+            unrankedPenalty:
+                typeof initialValues.unrankedPenalty === "number" && Number.isFinite(initialValues.unrankedPenalty)
+                    ? initialValues.unrankedPenalty
+                    : -initialParts.length,
+            preferences: normalizePreferences(
+                initialValues.preferences ?? {},
+                initialParticipants,
+                initialParts,
+                initialRankCount,
+            ),
+        };
+
+        if (!canSolvePartAssignSettings(initialSettings)) {
+            return createEmptyResult();
+        }
+
+        return computeSolveResult({
+            participants: initialSettings.participants,
+            parts: initialSettings.parts,
+            preferences: initialSettings.preferences,
+            normalizedRankCount: initialSettings.rankCount,
+            normalizedWeights: initialSettings.weights,
+            unrankedPenalty: initialSettings.unrankedPenalty,
+        });
+    });
+    const [urlLoadError, setUrlLoadError] = useState(() => getInitialUrlLoadStatus() === "error");
     const [copyShareUrlDone, setCopyShareUrlDone] = useState(false);
     const copyShareUrlDoneTimerRef = useRef<number | null>(null);
 
@@ -147,19 +321,11 @@ export function usePartAssign(form: PartAssignForm) {
     useEffect(() => {
         if (typeof window === "undefined") return;
 
-        const initialUrlStatus = getInitialUrlLoadStatus();
-        if (initialUrlStatus === "success") {
-            const params = new URLSearchParams(window.location.search);
-            params.delete("state");
-            const nextQuery = params.toString();
-            const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
-            window.history.replaceState(null, "", nextUrl);
-            return;
-        }
-
-        if (initialUrlStatus === "error") {
-            setUrlLoadError(true);
-        }
+        const params = new URLSearchParams(window.location.search);
+        params.delete("state");
+        const nextQuery = params.toString();
+        const nextUrl = `${window.location.pathname}${nextQuery ? `?${nextQuery}` : ""}${window.location.hash}`;
+        window.history.replaceState(null, "", nextUrl);
     }, []);
 
     useEffect(() => {
@@ -451,112 +617,16 @@ export function usePartAssign(form: PartAssignForm) {
             return;
         }
 
-        const n = participants.length;
-        const evaluatePartScore = (row: string[], assignedPartId: string) => {
-            const normalizedRow = row.slice(0, normalizedRankCount);
-            while (normalizedRow.length < normalizedRankCount) normalizedRow.push("");
-
-            const explicitlySelectedPartIds = new Set<string>();
-
-            for (let rankIndex = 0; rankIndex < normalizedRankCount; rankIndex += 1) {
-                const preferredPartId = normalizedRow[rankIndex];
-                if (!preferredPartId) continue;
-
-                if (preferredPartId === NO_PREFERENCE) {
-                    if (!explicitlySelectedPartIds.has(assignedPartId)) {
-                        return {
-                            score: normalizedWeights[rankIndex] ?? 0,
-                            rank: rankIndex + 1,
-                        };
-                    }
-                    continue;
-                }
-
-                if (preferredPartId === assignedPartId) {
-                    return {
-                        score: normalizedWeights[rankIndex] ?? 0,
-                        rank: rankIndex + 1,
-                    };
-                }
-
-                explicitlySelectedPartIds.add(preferredPartId);
-            }
-
-            return { score: unrankedPenalty, rank: null };
-        };
-
-        const evaluationMatrix = participants.map((participant) => {
-            const row = preferences[participant.id] ?? [];
-            return parts.map((part) => evaluatePartScore(row, part.id));
-        });
-
-        const scoreMatrix: number[][] = evaluationMatrix.map((evaluationRow) =>
-            evaluationRow.map((evaluation) => evaluation.score),
+        setResult(
+            computeSolveResult({
+                participants,
+                parts,
+                preferences,
+                normalizedRankCount,
+                normalizedWeights,
+                unrankedPenalty,
+            }),
         );
-
-        const used = Array.from({ length: n }, () => false);
-        const currentAssignment = Array.from({ length: n }, () => -1);
-        const candidates: AssignmentCandidate[] = [];
-        let bestScore = Number.NEGATIVE_INFINITY;
-        let tieCount = 0;
-
-        // 現在の割り当て状態から AssignmentCandidate オブジェクトを構築する
-        const buildCandidate = (totalScore: number): AssignmentCandidate => {
-            const participantIndexByPartIndex = Array.from({ length: n }, () => -1);
-            currentAssignment.forEach((partIndex, participantIndex) => {
-                participantIndexByPartIndex[partIndex] = participantIndex;
-            });
-
-            const lines: AssignmentLine[] = parts.map((part, partIndex) => {
-                const participantIndex = participantIndexByPartIndex[partIndex];
-                const participant = participants[participantIndex];
-                const evaluation = evaluationMatrix[participantIndex][partIndex];
-                return {
-                    participantId: participant.id,
-                    participantName: participant.name,
-                    partId: part.id,
-                    partName: part.name,
-                    rank: evaluation.rank,
-                    score: evaluation.score,
-                };
-            });
-            return { totalScore, lines };
-        };
-
-        // 深さ優先探索で全割り当てパターンを探索する
-        const dfs = (depth: number, score: number) => {
-            if (depth === n) {
-                if (score > bestScore) {
-                    bestScore = score;
-                    tieCount = 1;
-                    candidates.length = 0;
-                    candidates.push(buildCandidate(score));
-                } else if (score === bestScore) {
-                    tieCount += 1;
-                    if (candidates.length < MAX_TIE_RESULTS) {
-                        candidates.push(buildCandidate(score));
-                    }
-                }
-                return;
-            }
-
-            for (let partIndex = 0; partIndex < n; partIndex += 1) {
-                if (used[partIndex]) continue;
-                used[partIndex] = true;
-                currentAssignment[depth] = partIndex;
-                dfs(depth + 1, score + scoreMatrix[depth][partIndex]);
-                used[partIndex] = false;
-            }
-        };
-
-        dfs(0, 0);
-
-        setResult({
-            totalBestScore: Number.isFinite(bestScore) ? bestScore : null,
-            candidates,
-            overflowCount: Math.max(tieCount - MAX_TIE_RESULTS, 0),
-            searchedCount: calcSearchCount(n),
-        });
     };
 
     return {

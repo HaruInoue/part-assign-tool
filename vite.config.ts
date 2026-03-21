@@ -7,7 +7,7 @@ export default defineConfig({
   base: "/part-assign-tool/",
   resolve: {
     alias: {
-      "@": resolve(__dirname, "app"),
+      "@": resolve(__dirname, "src"),
     },
   },
   plugins: [reactRouter(), tsconfigPaths()],

@@ -26,8 +26,8 @@
     "baseUrl": ".",
     "paths": {
       "@/*": [
-        "./app/*",
-        "./.react-router/types/app/*"
+        "./src/*",
+        "./.react-router/types/src/*"
       ]
     },
     "esModuleInterop": true,

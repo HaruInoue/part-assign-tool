@@ -93,7 +93,7 @@ npm run deploy
 ## プロジェクト構成
 
 ```text
-app/
+src/
 	routes/PartAssignPage.tsx       # 画面UI
 	features/usePartAssign.ts       # 割り当て計算ロジックと状態管理
 	features/usePartAssignForm.ts   # フォーム初期化とバリデーション

@@ -9,10 +9,17 @@ const STORAGE_KEY = "part-assign-tool:settings";
 const URL_STATE_PARAM_KEY = "state";
 
 export type UrlStateLoadStatus = "none" | "success" | "error";
+export type InitialSettingsSource = "url" | "localStorage" | "default";
 
 type UrlStateLoadResult = {
     settings: PartAssignSettings | null;
     status: UrlStateLoadStatus;
+};
+
+export type InitialSettingsLoadResult = {
+    settings: PartAssignSettings | null;
+    source: InitialSettingsSource;
+    urlStateStatus: UrlStateLoadStatus;
 };
 
 // 値がオブジェクト型かどうかを判定する型ガード
@@ -140,4 +147,41 @@ export const savePartAssignSettings = (settings: PartAssignSettings) => {
 export const clearPartAssignSettings = () => {
     if (typeof window === "undefined") return;
     window.localStorage.removeItem(STORAGE_KEY);
+};
+
+// URL 優先で初期設定を読み込み、次に localStorage、最後に default 扱いで返す
+export const loadInitialPartAssignSettings = (): InitialSettingsLoadResult => {
+    const urlResult = loadPartAssignSettingsFromUrl();
+    if (urlResult.settings) {
+        return {
+            settings: urlResult.settings,
+            source: "url",
+            urlStateStatus: urlResult.status,
+        };
+    }
+
+    // state パラメータがあるが不正な場合は、復元失敗を明確にするため
+    // localStorage へはフォールバックせず default 扱いにする。
+    if (urlResult.status === "error") {
+        return {
+            settings: null,
+            source: "default",
+            urlStateStatus: urlResult.status,
+        };
+    }
+
+    const localStorageSettings = loadPartAssignSettings();
+    if (localStorageSettings) {
+        return {
+            settings: localStorageSettings,
+            source: "localStorage",
+            urlStateStatus: urlResult.status,
+        };
+    }
+
+    return {
+        settings: null,
+        source: "default",
+        urlStateStatus: urlResult.status,
+    };
 };
